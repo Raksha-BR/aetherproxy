@@ -4,6 +4,7 @@
 #include <boost/beast.hpp>
 
 #include <memory>
+#include <string>
 
 namespace aether::networking {
 
@@ -55,17 +56,30 @@ private:
         std::size_t bytes_transferred
     );
 
+    void start_upstream_timeout();
+
+    void cancel_upstream_timeout();
+
+    void send_error(
+        http::status status,
+        const std::string& message
+    );
+
     void close();
 
     tcp::socket socket_;
     tcp::resolver resolver_;
     tcp::socket upstream_socket_;
 
+    net::steady_timer upstream_timer_;
+
     beast::flat_buffer buffer_;
     beast::flat_buffer upstream_buffer_;
 
     http::request<http::string_body> request_;
     http::response<http::string_body> response_;
+
+    bool response_started_{false};
 };
 
 } // namespace aether::networking

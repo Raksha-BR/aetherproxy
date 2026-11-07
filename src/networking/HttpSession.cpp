@@ -186,10 +186,6 @@ void HttpSession::on_forward(
             current_backend_.host,
             current_backend_.port
         );
-        registry_->mark_unhealthy(
-            current_backend_.host,
-            current_backend_.port
-        );
         send_error(
             http::status::bad_gateway,
             "Failed to forward request to backend."

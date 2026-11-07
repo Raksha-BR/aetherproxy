@@ -1,30 +1,45 @@
 #include "aether/core/BackendHealthMonitor.hpp"
 
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+
+#include <functional>
 #include <iostream>
+#include <stdexcept>
 #include <utility>
 
 namespace aether::core {
 
 namespace {
 
-using tcp = boost::asio::ip::tcp;
 namespace net = boost::asio;
+namespace beast = boost::beast;
+namespace http = beast::http;
+
+using tcp = net::ip::tcp;
 
 struct CheckOperation
     : std::enable_shared_from_this<CheckOperation> {
 
     CheckOperation(
         net::io_context& io,
-        std::shared_ptr<BackendRegistry> registry,
         Backend backend,
-        std::chrono::seconds timeout
+        std::chrono::seconds timeout,
+        std::function<void(bool)> completion
     )
-        : registry(std::move(registry)),
-          backend(std::move(backend)),
+        : backend(std::move(backend)),
           resolver(io),
           socket(io),
           timer(io),
-          timeout(timeout) {
+          timeout(timeout),
+          completion(std::move(completion)) {
+
+        request.version(11);
+        request.method(http::verb::get);
+        request.target("/health");
+        request.set(http::field::host, this->backend.host);
+        request.set(http::field::user_agent, "AetherProxy-HealthMonitor");
+        request.keep_alive(false);
     }
 
     void start() {
@@ -61,9 +76,66 @@ struct CheckOperation
                         boost::system::error_code connect_error,
                         const tcp::endpoint&
                     ) {
-                        self->finish(!connect_error);
+                        if (self->completed) {
+                            return;
+                        }
+
+                        if (connect_error) {
+                            self->finish(false);
+                            return;
+                        }
+
+                        self->send_health_request();
                     }
                 );
+            }
+        );
+    }
+
+    void send_health_request() {
+        auto self = shared_from_this();
+
+        http::async_write(
+            socket,
+            request,
+            [self](
+                boost::system::error_code error,
+                std::size_t
+            ) {
+                if (self->completed) {
+                    return;
+                }
+
+                if (error) {
+                    self->finish(false);
+                    return;
+                }
+
+                self->read_health_response();
+            }
+        );
+    }
+
+    void read_health_response() {
+        auto self = shared_from_this();
+
+        http::async_read(
+            socket,
+            buffer,
+            response,
+            [self](
+                boost::system::error_code error,
+                std::size_t
+            ) {
+                if (self->completed) {
+                    return;
+                }
+
+                const bool healthy =
+                    !error &&
+                    self->response.result() == http::status::ok;
+
+                self->finish(healthy);
             }
         );
     }
@@ -81,25 +153,25 @@ struct CheckOperation
         resolver.cancel();
         socket.close(ignored);
 
-        if (healthy) {
-            registry->mark_healthy(backend.host, backend.port);
-            std::cout << "[HealthMonitor] Backend recovered: "
-                      << backend.host << ":" << backend.port << '\n';
-        } else {
-            registry->mark_unhealthy(backend.host, backend.port);
-            std::cout << "[HealthMonitor] Backend unhealthy: "
-                      << backend.host << ":" << backend.port << '\n';
+        if (completion) {
+            completion(healthy);
         }
     }
 
-    std::shared_ptr<BackendRegistry> registry;
     Backend backend;
 
     tcp::resolver resolver;
     tcp::socket socket;
     net::steady_timer timer;
 
+    beast::flat_buffer buffer;
+
+    http::request<http::empty_body> request;
+    http::response<http::string_body> response;
+
     std::chrono::seconds timeout;
+    std::function<void(bool)> completion;
+
     bool completed{false};
 };
 
@@ -116,12 +188,27 @@ BackendHealthMonitor::BackendHealthMonitor(
       timer_(io_context),
       interval_(interval),
       timeout_(timeout) {
+
+    if (!registry_) {
+        throw std::invalid_argument(
+            "Backend registry cannot be null."
+        );
+    }
+
+    if (interval_.count() <= 0 || timeout_.count() <= 0) {
+        throw std::invalid_argument(
+            "Health check interval and timeout must be positive."
+        );
+    }
 }
 
 void BackendHealthMonitor::start() {
+    if (!stopped_) {
+        return;
+    }
+
     stopped_ = false;
     check_backends();
-    schedule_next_check();
 }
 
 void BackendHealthMonitor::stop() {
@@ -132,18 +219,71 @@ void BackendHealthMonitor::stop() {
 }
 
 void BackendHealthMonitor::check_backends() {
-    for (const auto& backend : registry_->all_backends()) {
+    if (stopped_ || cycle_running_) {
+        return;
+    }
+
+    const auto backends = registry_->all_backends();
+
+    if (backends.empty()) {
+        schedule_next_check();
+        return;
+    }
+
+    cycle_running_ = true;
+    pending_checks_ = backends.size();
+
+    auto self = shared_from_this();
+
+    for (const auto& backend : backends) {
+        auto completion = [self, backend](bool success) {
+            const auto transition =
+                self->registry_->record_health_check(
+                    backend.host,
+                    backend.port,
+                    success,
+                    success_threshold_,
+                    failure_threshold_
+                );
+
+            if (transition.has_value()) {
+                if (*transition) {
+                    std::cout << "[HealthMonitor] Backend recovered: ";
+                } else {
+                    std::cout << "[HealthMonitor] Backend unhealthy: ";
+                }
+
+                std::cout
+                    << backend.host << ":" << backend.port << '\n';
+            }
+
+            self->on_check_complete();
+        };
+
         std::make_shared<CheckOperation>(
             io_context_,
-            registry_,
             backend,
-            timeout_
+            timeout_,
+            std::move(completion)
         )->start();
     }
 }
 
+void BackendHealthMonitor::on_check_complete() {
+    if (pending_checks_ == 0) {
+        return;
+    }
+
+    --pending_checks_;
+
+    if (pending_checks_ == 0) {
+        cycle_running_ = false;
+        schedule_next_check();
+    }
+}
+
 void BackendHealthMonitor::schedule_next_check() {
-    if (stopped_) {
+    if (stopped_ || cycle_running_) {
         return;
     }
 
@@ -157,7 +297,6 @@ void BackendHealthMonitor::schedule_next_check() {
         }
 
         self->check_backends();
-        self->schedule_next_check();
     });
 }
 

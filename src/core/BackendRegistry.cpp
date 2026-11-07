@@ -31,7 +31,7 @@ std::optional<Backend> BackendRegistry::next_backend() {
     return std::nullopt;
 }
 
-void BackendRegistry::mark_healthy(
+bool BackendRegistry::mark_healthy(
     const std::string& host,
     const std::string& port
 ) {
@@ -39,13 +39,20 @@ void BackendRegistry::mark_healthy(
 
     for (auto& backend : backends_) {
         if (backend.host == host && backend.port == port) {
+            const bool changed = !backend.healthy;
+
             backend.healthy = true;
-            return;
+            backend.consecutive_successes = 0;
+            backend.consecutive_failures = 0;
+
+            return changed;
         }
     }
+
+    return false;
 }
 
-void BackendRegistry::mark_unhealthy(
+bool BackendRegistry::mark_unhealthy(
     const std::string& host,
     const std::string& port
 ) {
@@ -53,10 +60,69 @@ void BackendRegistry::mark_unhealthy(
 
     for (auto& backend : backends_) {
         if (backend.host == host && backend.port == port) {
+            const bool changed = backend.healthy;
+
             backend.healthy = false;
-            return;
+            backend.consecutive_successes = 0;
+            backend.consecutive_failures = 0;
+
+            return changed;
         }
     }
+
+    return false;
+}
+
+std::optional<bool> BackendRegistry::record_health_check(
+    const std::string& host,
+    const std::string& port,
+    bool success,
+    std::size_t success_threshold,
+    std::size_t failure_threshold
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (auto& backend : backends_) {
+        if (backend.host != host || backend.port != port) {
+            continue;
+        }
+
+        if (success) {
+            backend.consecutive_failures = 0;
+
+            if (backend.healthy) {
+                backend.consecutive_successes = 0;
+                return std::nullopt;
+            }
+
+            ++backend.consecutive_successes;
+
+            if (backend.consecutive_successes >= success_threshold) {
+                backend.healthy = true;
+                backend.consecutive_successes = 0;
+                return true;
+            }
+        } else {
+            backend.consecutive_successes = 0;
+
+            if (!backend.healthy) {
+                backend.consecutive_failures = 0;
+                return std::nullopt;
+            }
+
+            ++backend.consecutive_failures;
+
+            if (backend.consecutive_failures >= failure_threshold) {
+                backend.healthy = false;
+                backend.consecutive_failures = 0;
+                return false;
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    return std::nullopt;
 }
 
 std::size_t BackendRegistry::size() const {
@@ -77,6 +143,7 @@ std::size_t BackendRegistry::healthy_count() const {
 
     return count;
 }
+
 std::vector<Backend> BackendRegistry::all_backends() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return backends_;

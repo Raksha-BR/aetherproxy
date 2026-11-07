@@ -12,17 +12,27 @@ struct Backend {
     std::string host;
     std::string port;
     bool healthy{true};
+
+    std::size_t consecutive_successes{0};
+    std::size_t consecutive_failures{0};
 };
 
 class BackendRegistry {
 public:
     explicit BackendRegistry(std::vector<Backend> backends);
 
-
     std::optional<Backend> next_backend();
 
-    void mark_healthy(const std::string& host, const std::string& port);
-    void mark_unhealthy(const std::string& host, const std::string& port);
+    bool mark_healthy(const std::string& host, const std::string& port);
+    bool mark_unhealthy(const std::string& host, const std::string& port);
+
+    std::optional<bool> record_health_check(
+        const std::string& host,
+        const std::string& port,
+        bool success,
+        std::size_t success_threshold,
+        std::size_t failure_threshold
+    );
 
     std::size_t size() const;
     std::size_t healthy_count() const;

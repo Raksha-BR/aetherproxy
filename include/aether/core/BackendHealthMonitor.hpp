@@ -5,6 +5,7 @@
 #include <boost/asio.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <memory>
 
 namespace aether::core {
@@ -24,6 +25,7 @@ public:
 
 private:
     void check_backends();
+    void on_check_complete();
     void schedule_next_check();
 
     boost::asio::io_context& io_context_;
@@ -32,7 +34,13 @@ private:
 
     std::chrono::seconds interval_;
     std::chrono::seconds timeout_;
-    bool stopped_{false};
+
+    std::size_t pending_checks_{0};
+    bool cycle_running_{false};
+    bool stopped_{true};
+
+    static constexpr std::size_t success_threshold_{2};
+    static constexpr std::size_t failure_threshold_{2};
 };
 
 } // namespace aether::core

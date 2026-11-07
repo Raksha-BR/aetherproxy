@@ -1,4 +1,6 @@
 #include "aether/networking/HttpListener.hpp"
+#include "aether/networking/HttpSession.hpp"
+#include "aether/core/BackendRegistry.hpp"
 
 #include <iostream>
 #include <utility>
@@ -7,9 +9,11 @@ namespace aether::networking {
 
 HttpListener::HttpListener(
     net::io_context& io_context,
-    const tcp::endpoint& endpoint
+    const tcp::endpoint& endpoint,
+    std::shared_ptr<aether::core::BackendRegistry> registry
 )
     : io_context_(io_context),
+      registry_(std::move(registry)),
       acceptor_(io_context) {
 
     beast::error_code error;
@@ -59,11 +63,14 @@ void HttpListener::accept_connection() {
             tcp::socket socket
         ) {
             if (!error) {
-                std::cerr << "[AetherProxy] Accepted client connection\n";
+                std::cerr
+                    << "[AetherProxy] Accepted client connection\n";
 
                 std::make_shared<HttpSession>(
-                    std::move(socket)
+                    std::move(socket),
+                    self->registry_
                 )->run();
+
             } else {
                 std::cerr
                     << "[AetherProxy] Accept error: "

@@ -1,4 +1,5 @@
 #include "aether/networking/HttpSession.hpp"
+#include "aether/core/BackendRegistry.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -6,8 +7,12 @@
 
 namespace aether::networking {
 
-HttpSession::HttpSession(tcp::socket socket)
-    : socket_(std::move(socket)),
+HttpSession::HttpSession(
+    tcp::socket socket,
+    std::shared_ptr<aether::core::BackendRegistry> registry
+)
+    : registry_(std::move(registry)),
+      socket_(std::move(socket)),
       resolver_(socket_.get_executor()),
       upstream_socket_(socket_.get_executor()),
       upstream_timer_(socket_.get_executor()) {
@@ -55,13 +60,31 @@ void HttpSession::on_read(
 }
 
 void HttpSession::connect_backend() {
+    auto backend = registry_->next_backend();
+
+    if (!backend) {
+        std::cerr << "[AetherProxy] No healthy backends available\n";
+
+        send_error(
+            http::status::service_unavailable,
+            "No healthy backend servers available."
+        );
+        return;
+    }
+
+    current_backend_ = *backend;
+
+    std::cerr << "[AetherProxy] Selected backend: "
+              << current_backend_.host << ":"
+              << current_backend_.port << '\n';
+
     start_upstream_timeout();
 
     auto self = shared_from_this();
 
     resolver_.async_resolve(
-        "127.0.0.1",
-        "9001",
+        current_backend_.host,
+        current_backend_.port,
         [self](
             beast::error_code error,
             tcp::resolver::results_type results
@@ -73,6 +96,11 @@ void HttpSession::connect_backend() {
             if (error) {
                 std::cerr << "[AetherProxy] Backend resolve error: "
                           << error.message() << '\n';
+
+                self->registry_->mark_unhealthy(
+                    self->current_backend_.host,
+                    self->current_backend_.port
+                );
 
                 self->send_error(
                     http::status::bad_gateway,
@@ -109,6 +137,10 @@ void HttpSession::on_connect(
         std::cerr << "[AetherProxy] Backend connection error: "
                   << error.message() << '\n';
 
+        registry_->mark_unhealthy(
+            current_backend_.host,
+            current_backend_.port
+        );
         send_error(
             http::status::bad_gateway,
             "Could not connect to backend server."
@@ -122,7 +154,10 @@ void HttpSession::on_connect(
 }
 
 void HttpSession::forward_request() {
-    request_.set(http::field::host, "127.0.0.1:9001");
+    request_.set(
+    http::field::host,
+    current_backend_.host + ":" + current_backend_.port
+);
 
     auto self = shared_from_this();
 
@@ -147,6 +182,14 @@ void HttpSession::on_forward(
         std::cerr << "[AetherProxy] Backend write error: "
                   << error.message() << '\n';
 
+        registry_->mark_unhealthy(
+            current_backend_.host,
+            current_backend_.port
+        );
+        registry_->mark_unhealthy(
+            current_backend_.host,
+            current_backend_.port
+        );
         send_error(
             http::status::bad_gateway,
             "Failed to forward request to backend."
@@ -182,6 +225,10 @@ void HttpSession::on_backend_read(
         std::cerr << "[AetherProxy] Backend read error: "
                   << error.message() << '\n';
 
+        registry_->mark_unhealthy(
+            current_backend_.host,
+            current_backend_.port
+        );
         send_error(
             http::status::bad_gateway,
             "Failed to receive response from backend."

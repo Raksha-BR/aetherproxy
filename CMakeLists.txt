@@ -20,11 +20,11 @@ find_package(Threads REQUIRED)
 add_executable(aetherproxy
 
     src/main.cpp
-
     src/core/ProxyServer.cpp
-
     src/networking/HttpListener.cpp
     src/networking/HttpSession.cpp
+    src/core/BackendRegistry.cpp
+    src/core/BackendHealthMonitor.cpp
 )
 
 # Include directories

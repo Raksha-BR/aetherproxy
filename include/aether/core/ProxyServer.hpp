@@ -1,6 +1,8 @@
 #pragma once
 
+#include "aether/core/BackendRegistry.hpp"
 #include "aether/networking/HttpListener.hpp"
+#include "aether/core/BackendHealthMonitor.hpp"
 
 #include <memory>
 #include <string>
@@ -18,6 +20,9 @@ public:
 
 private:
     networking::net::io_context io_context_;
+
+    std::shared_ptr<BackendRegistry> registry_;
+    std::shared_ptr<BackendHealthMonitor> health_monitor_;
 
     std::shared_ptr<networking::HttpListener> listener_;
 };

@@ -180,14 +180,18 @@ struct CheckOperation
 BackendHealthMonitor::BackendHealthMonitor(
     net::io_context& io_context,
     std::shared_ptr<BackendRegistry> registry,
-    std::chrono::seconds interval,
-    std::chrono::seconds timeout
+        std::chrono::seconds interval,
+        std::chrono::seconds timeout,
+        std::size_t success_threshold,
+        std::size_t failure_threshold
 )
     : io_context_(io_context),
       registry_(std::move(registry)),
       timer_(io_context),
-      interval_(interval),
-      timeout_(timeout) {
+     interval_(interval),
+     timeout_(timeout),
+     success_threshold_(success_threshold),
+     failure_threshold_(failure_threshold) {
 
     if (!registry_) {
         throw std::invalid_argument(
@@ -195,9 +199,12 @@ BackendHealthMonitor::BackendHealthMonitor(
         );
     }
 
-    if (interval_.count() <= 0 || timeout_.count() <= 0) {
+    if (interval_.count() <= 0 ||
+        timeout_.count() <= 0 ||
+        success_threshold_ == 0 ||
+        failure_threshold_ == 0) {
         throw std::invalid_argument(
-            "Health check interval and timeout must be positive."
+            "Health check settings and thresholds must be positive."
         );
     }
 }
@@ -236,14 +243,14 @@ void BackendHealthMonitor::check_backends() {
     auto self = shared_from_this();
 
     for (const auto& backend : backends) {
-        auto completion = [self, backend](bool success) {
+                auto completion = [self, backend](bool success) {
             const auto transition =
                 self->registry_->record_health_check(
                     backend.host,
                     backend.port,
                     success,
-                    success_threshold_,
-                    failure_threshold_
+                    self->success_threshold_,
+                    self->failure_threshold_
                 );
 
             if (transition.has_value()) {

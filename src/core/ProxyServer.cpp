@@ -2,35 +2,30 @@
 
 #include <iostream>
 #include <utility>
-#include <vector>
 
 namespace aether::core {
 
-ProxyServer::ProxyServer(
-    const std::string& address,
-    unsigned short port
-)
+ProxyServer::ProxyServer(const config::ProxyConfig& config)
     : io_context_(1),
       registry_(
-          std::make_shared<BackendRegistry>(
-              std::vector<Backend>{
-                  {"127.0.0.1", "9001"},
-                  {"127.0.0.1", "9002"},
-                  {"127.0.0.1", "9003"}
-              }
-          )
+          std::make_shared<BackendRegistry>(config.backends)
       ) {
 
     const auto endpoint =
         networking::tcp::endpoint(
-            networking::net::ip::make_address(address),
-            port
+            networking::net::ip::make_address(config.server_host),
+            config.server_port
         );
-        health_monitor_ =
-            std::make_shared<BackendHealthMonitor>(
-                io_context_,
-                registry_
-            );
+
+    health_monitor_ =
+        std::make_shared<BackendHealthMonitor>(
+            io_context_,
+            registry_,
+            config.health_check_interval,
+            config.health_check_timeout,
+            config.success_threshold,
+            config.failure_threshold
+        );
 
     listener_ =
         std::make_shared<networking::HttpListener>(
@@ -42,8 +37,7 @@ ProxyServer::ProxyServer(
 
 void ProxyServer::run() {
     std::cout
-        << "[AetherProxy] Listening on "
-        << "127.0.0.1:8080\n";
+        << "[AetherProxy] Starting configured server...\n";
 
     health_monitor_->start();
     listener_->run();

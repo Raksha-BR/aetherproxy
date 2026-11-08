@@ -1,26 +1,29 @@
 # AetherProxy
 
-AetherProxy is a C++20 HTTP reverse proxy that distributes incoming client requests across multiple backend servers using round-robin load balancing.
+AetherProxy is a C++20 asynchronous HTTP reverse proxy that distributes incoming client requests across multiple backend servers using round-robin load balancing.
 
-The project demonstrates networking, asynchronous I/O, backend health monitoring, failure detection, and automatic recovery.
+The project demonstrates networking, asynchronous I/O, backend health monitoring, failure detection, automatic recovery, and YAML-based configuration management.
 
 ## Features
 
 - HTTP reverse proxy using Boost.Asio and Boost.Beast.
 - Round-robin load balancing across healthy backends.
 - Passive backend failure detection.
-- Active HTTP health monitoring using `GET /health`.
-- Two consecutive failed checks before active unhealthy transition.
-- Two consecutive successful checks before active recovery.
-- Automatic backend exclusion and recovery.
-- Health-check and upstream request timeouts.
+- Active asynchronous HTTP health monitoring using `GET /health`.
+- Configurable health-check intervals, timeouts, and recovery thresholds.
+- YAML-based server and backend configuration.
+- Runtime backend registration through configuration.
+- Automatic unhealthy backend exclusion and recovery.
+- Upstream request and health-check timeouts.
 - Runtime logging.
+- Configuration validation, including invalid ports and duplicate backend entries.
 
 ## Tech Stack
 
 - C++20
 - Boost.Asio
 - Boost.Beast
+- yaml-cpp
 - CMake
 - Linux / Ubuntu (WSL2)
 
@@ -42,14 +45,21 @@ Backend Registry ---- Health Monitor
   |
   +---- Backend 1 :9001
   +---- Backend 2 :9002
-  +---- Backend 3 :9003
+  +---- Backend 3 :9004
 ```
 
 ## Project Structure
 
 ```text
 aetherproxy/
+├── config/
+│   ├── aetherproxy.yaml
+│   ├── backends.json
+│   └── caddy/
+│       └── Caddyfile
 ├── include/aether/
+│   ├── config/
+│   │   └── ProxyConfig.hpp
 │   ├── core/
 │   │   ├── BackendRegistry.hpp
 │   │   ├── BackendHealthMonitor.hpp
@@ -58,6 +68,8 @@ aetherproxy/
 │       ├── HttpListener.hpp
 │       └── HttpSession.hpp
 ├── src/
+│   ├── config/
+│   │   └── ProxyConfig.cpp
 │   ├── core/
 │   │   ├── BackendRegistry.cpp
 │   │   ├── BackendHealthMonitor.cpp
@@ -90,7 +102,7 @@ Example:
 ```text
 Request 1 -> Backend 9001
 Request 2 -> Backend 9002
-Request 3 -> Backend 9003
+Request 3 -> Backend 9004
 Request 4 -> Backend 9001
 ```
 
@@ -119,13 +131,65 @@ An unhealthy backend requires two consecutive successful active checks before re
 
 Only health-state transitions are logged.
 
+## Configuration
+
+AetherProxy loads its configuration from:
+
+```text
+config/aetherproxy.yaml
+```
+
+Example:
+
+```yaml
+server:
+  host: 127.0.0.1
+  port: 8080
+
+health_check:
+  interval_seconds: 5
+  timeout_seconds: 2
+  failure_threshold: 2
+  success_threshold: 2
+
+backends:
+  - host: 127.0.0.1
+    port: 9001
+
+  - host: 127.0.0.1
+    port: 9002
+
+  - host: 127.0.0.1
+    port: 9004
+```
+
+Configuration options:
+
+| Setting | Description |
+|---|---|
+| `server.host` | IP address on which the proxy listens |
+| `server.port` | Proxy listening port |
+| `interval_seconds` | Time between health-check cycles |
+| `timeout_seconds` | Health-check timeout |
+| `failure_threshold` | Failed checks required to mark a backend unhealthy |
+| `success_threshold` | Successful checks required to recover a backend |
+| `backends` | List of backend host and port combinations |
+
+The configuration loader validates required fields, port ranges, health-check thresholds, and duplicate backend entries.
+
+You can also supply a different configuration file:
+
+```bash
+./build/aetherproxy path/to/custom-config.yaml
+```
+
 ## Prerequisites
 
-On Ubuntu:
+On Ubuntu / WSL2:
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake libboost-all-dev python3
+sudo apt install build-essential cmake libboost-all-dev libyaml-cpp-dev python3
 ```
 
 ## Build
@@ -140,11 +204,13 @@ cmake --build build -j2
 
 ## Run AetherProxy
 
+From the project root:
+
 ```bash
 ./build/aetherproxy
 ```
 
-The proxy listens on:
+The default configuration listens on:
 
 ```text
 127.0.0.1:8080
@@ -155,12 +221,12 @@ Configured backends:
 ```text
 127.0.0.1:9001
 127.0.0.1:9002
-127.0.0.1:9003
+127.0.0.1:9004
 ```
 
 ## Run Test Backends
 
-Open three separate terminals. Run the following script in each terminal, changing `9001` to `9002` and `9003` for the other backends.
+Open three separate terminals. Run the following script in each terminal, changing `9001` to `9002` and `9004` for the other backends.
 
 ```bash
 PORT=9001 python3 - <<'PY'
@@ -207,19 +273,19 @@ Check backend health endpoints:
 ```bash
 curl -i http://127.0.0.1:9001/health
 curl -i http://127.0.0.1:9002/health
-curl -i http://127.0.0.1:9003/health
+curl -i http://127.0.0.1:9004/health
 ```
 
 Each healthy backend should return HTTP `200 OK`.
 
 ## Test Failure Detection and Recovery
 
-1. Start all three backends and AetherProxy.
-2. Configure backend 9002 to return HTTP `503` for `/health`.
-3. Wait for two consecutive failed checks.
+1. Start all configured backends and AetherProxy.
+2. Configure one backend to return HTTP `503` for `/health`.
+3. Wait for the configured consecutive failure threshold.
 4. Verify the unhealthy transition in the AetherProxy terminal.
-5. Restore backend 9002 so `/health` returns HTTP `200`.
-6. Wait for two consecutive successful checks.
+5. Restore the backend so `/health` returns HTTP `200`.
+6. Wait for the configured consecutive success threshold.
 7. Verify the recovery transition.
 
 ## Logging
@@ -246,14 +312,16 @@ Implemented:
 - Multiple backend support
 - Passive backend failure detection
 - Active asynchronous HTTP health checks
-- Consecutive failure and recovery thresholds
+- Configurable health-check intervals and thresholds
+- YAML-based server and backend configuration
+- Configuration validation
+- Custom configuration file support
 - Automatic backend exclusion and recovery
 - Upstream and health-check timeouts
 - Runtime logging
 
 Planned:
 
-- Configurable backend definitions
 - Configurable load-balancing strategies
 - Connection pooling
 - Metrics and observability

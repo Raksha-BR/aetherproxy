@@ -1,20 +1,17 @@
 #pragma once
 
+#include "aether/config/ProxyConfig.hpp"
+#include "aether/core/BackendHealthMonitor.hpp"
 #include "aether/core/BackendRegistry.hpp"
 #include "aether/networking/HttpListener.hpp"
-#include "aether/core/BackendHealthMonitor.hpp"
 
 #include <memory>
-#include <string>
 
 namespace aether::core {
 
 class ProxyServer {
 public:
-    ProxyServer(
-        const std::string& address,
-        unsigned short port
-    );
+    explicit ProxyServer(const config::ProxyConfig& config);
 
     void run();
 
@@ -23,7 +20,6 @@ private:
 
     std::shared_ptr<BackendRegistry> registry_;
     std::shared_ptr<BackendHealthMonitor> health_monitor_;
-
     std::shared_ptr<networking::HttpListener> listener_;
 };
 

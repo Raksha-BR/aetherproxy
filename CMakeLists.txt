@@ -15,6 +15,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Dependencies
 find_package(Boost 1.74 REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 # Executable
 add_executable(aetherproxy
@@ -25,6 +26,7 @@ add_executable(aetherproxy
     src/networking/HttpSession.cpp
     src/core/BackendRegistry.cpp
     src/core/BackendHealthMonitor.cpp
+    src/config/ProxyConfig.cpp
 )
 
 # Include directories
@@ -38,6 +40,7 @@ target_link_libraries(aetherproxy
     PRIVATE
         Boost::system
         Threads::Threads
+        yaml-cpp
 )
 
 # Compiler warnings

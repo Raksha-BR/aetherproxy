@@ -7,10 +7,12 @@ namespace aether::core {
 
 ProxyServer::ProxyServer(const config::ProxyConfig& config)
     : io_context_(1),
-      registry_(
-          std::make_shared<BackendRegistry>(config.backends)
-      ) {
-
+    registry_(
+        std::make_shared<BackendRegistry>(
+            config.backends,
+            config.load_balancing_strategy
+        )
+    ) {
     const auto endpoint =
         networking::tcp::endpoint(
             networking::net::ip::make_address(config.server_host),

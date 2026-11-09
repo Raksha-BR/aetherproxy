@@ -1,31 +1,122 @@
+
 #include "aether/core/BackendRegistry.hpp"
 
+#include <limits>
+#include <random>
 #include <stdexcept>
 #include <utility>
 
 namespace aether::core {
 
-BackendRegistry::BackendRegistry(std::vector<Backend> backends)
-    : backends_(std::move(backends)) {
+BackendRegistry::BackendRegistry(
+    std::vector<Backend> backends,
+    LoadBalancingStrategy strategy
+)
+    : backends_(std::move(backends)),
+      strategy_(strategy),
+      current_weights_(backends_.size(), 0),
+      random_engine_(std::random_device{}()) {
 
     if (backends_.empty()) {
         throw std::invalid_argument(
             "Backend registry cannot be empty."
         );
     }
+
+    if (strategy_ != LoadBalancingStrategy::RoundRobin &&
+        strategy_ != LoadBalancingStrategy::Random &&
+        strategy_ != LoadBalancingStrategy::WeightedRoundRobin) {
+        throw std::invalid_argument(
+            "Invalid load-balancing strategy."
+        );
+    }
+
+    const auto max_weight =
+        static_cast<std::size_t>(
+            std::numeric_limits<std::int64_t>::max()
+        );
+
+    std::size_t total_weight = 0;
+
+    for (const auto& backend : backends_) {
+        if (backend.weight == 0 || backend.weight > max_weight ||
+            backend.weight > max_weight - total_weight) {
+            throw std::invalid_argument(
+                "Backend weights must be positive and their sum "
+                "must fit in int64_t."
+            );
+        }
+
+        total_weight += backend.weight;
+    }
 }
 
 std::optional<Backend> BackendRegistry::next_backend() {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    for (std::size_t i = 0; i < backends_.size(); ++i) {
-        const std::size_t index =
-            (next_index_ + i) % backends_.size();
+    std::vector<std::size_t> healthy_indices;
 
-        if (backends_[index].healthy) {
-            next_index_ = (index + 1) % backends_.size();
-            return backends_[index];
+    for (std::size_t i = 0; i < backends_.size(); ++i) {
+        if (backends_[i].healthy) {
+            healthy_indices.push_back(i);
+        } else {
+            current_weights_[i] = 0;
         }
+    }
+
+    if (healthy_indices.empty()) {
+        return std::nullopt;
+    }
+
+    // Strategy 1: Round Robin
+    if (strategy_ == LoadBalancingStrategy::RoundRobin) {
+        for (std::size_t i = 0; i < backends_.size(); ++i) {
+            const std::size_t index =
+                (next_index_ + i) % backends_.size();
+
+            if (backends_[index].healthy) {
+                next_index_ = (index + 1) % backends_.size();
+                return backends_[index];
+            }
+        }
+    }
+
+    // Strategy 2: Random
+    if (strategy_ == LoadBalancingStrategy::Random) {
+        std::uniform_int_distribution<std::size_t> distribution(
+            0,
+            healthy_indices.size() - 1
+        );
+
+        const auto index =
+            healthy_indices[distribution(random_engine_)];
+
+        return backends_[index];
+    }
+
+    // Strategy 3: Smooth Weighted Round Robin
+    if (strategy_ == LoadBalancingStrategy::WeightedRoundRobin) {
+        std::size_t total_weight = 0;
+        std::size_t selected_index = healthy_indices.front();
+
+        for (const auto index : healthy_indices) {
+            const auto weight = backends_[index].weight;
+
+            total_weight += weight;
+
+            current_weights_[index] +=
+                static_cast<std::int64_t>(weight);
+
+            if (current_weights_[index] >
+                current_weights_[selected_index]) {
+                selected_index = index;
+            }
+        }
+
+        current_weights_[selected_index] -=
+            static_cast<std::int64_t>(total_weight);
+
+        return backends_[selected_index];
     }
 
     return std::nullopt;

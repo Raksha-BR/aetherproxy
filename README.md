@@ -1,22 +1,23 @@
 # AetherProxy
 
-AetherProxy is a C++20 asynchronous HTTP reverse proxy that distributes incoming client requests across multiple backend servers using round-robin load balancing.
+AetherProxy is a C++20 asynchronous HTTP reverse proxy that distributes incoming client requests across multiple backend servers using configurable load-balancing strategies.
 
 The project demonstrates networking, asynchronous I/O, backend health monitoring, failure detection, automatic recovery, and YAML-based configuration management.
 
 ## Features
 
 - HTTP reverse proxy using Boost.Asio and Boost.Beast.
-- Round-robin load balancing across healthy backends.
+- Configurable Round Robin, Random, and Weighted Round Robin load balancing.
+- Smooth weighted scheduling based on backend weights.
 - Passive backend failure detection.
 - Active asynchronous HTTP health monitoring using `GET /health`.
 - Configurable health-check intervals, timeouts, and recovery thresholds.
-- YAML-based server and backend configuration.
-- Runtime backend registration through configuration.
+- YAML-based server, backend, and load-balancing configuration.
+- Configurable backend weights.
 - Automatic unhealthy backend exclusion and recovery.
 - Upstream request and health-check timeouts.
 - Runtime logging.
-- Configuration validation, including invalid ports and duplicate backend entries.
+- Configuration validation, including invalid ports, duplicate backend entries, invalid strategies, and backend weights.
 
 ## Tech Stack
 
@@ -89,15 +90,17 @@ aetherproxy/
 
 1. The listener accepts a client connection.
 2. An HTTP session reads the incoming request.
-3. The registry selects the next healthy backend.
+3. The registry selects a healthy backend using the configured load-balancing strategy.
 4. The proxy forwards the request to that backend.
 5. The backend response is returned to the client.
 
-### 2. Round-Robin Load Balancing
+### 2. Load-Balancing Strategies
 
-Requests are distributed across healthy backends in sequence.
+AetherProxy supports three backend selection strategies.
 
-Example:
+**Round Robin**
+
+Distributes requests sequentially across healthy backends.
 
 ```text
 Request 1 -> Backend 9001
@@ -106,7 +109,23 @@ Request 3 -> Backend 9004
 Request 4 -> Backend 9001
 ```
 
-Unhealthy backends are skipped.
+**Random**
+
+Selects a healthy backend randomly for each incoming request.
+
+**Weighted Round Robin**
+
+Uses a smooth weighted round-robin scheduling algorithm to distribute requests according to configured backend weights.
+
+For example, weights of 3:2:1 produce approximately:
+
+| Backend | Weight | Requests out of 30 |
+|---|---:|---:|
+| 9001 | 3 | 15 |
+| 9002 | 2 | 10 |
+| 9004 | 1 | 5 |
+
+Unhealthy backends are excluded from backend selection.
 
 ### 3. Passive Health Detection
 
@@ -146,6 +165,9 @@ server:
   host: 127.0.0.1
   port: 8080
 
+load_balancing:
+  strategy: round_robin
+
 health_check:
   interval_seconds: 5
   timeout_seconds: 2
@@ -155,27 +177,42 @@ health_check:
 backends:
   - host: 127.0.0.1
     port: 9001
+    weight: 3
 
   - host: 127.0.0.1
     port: 9002
+    weight: 2
 
   - host: 127.0.0.1
     port: 9004
+    weight: 1
 ```
 
-Configuration options:
+### Configuration Options
 
 | Setting | Description |
 |---|---|
 | `server.host` | IP address on which the proxy listens |
 | `server.port` | Proxy listening port |
+| `load_balancing.strategy` | Backend selection strategy |
 | `interval_seconds` | Time between health-check cycles |
 | `timeout_seconds` | Health-check timeout |
 | `failure_threshold` | Failed checks required to mark a backend unhealthy |
 | `success_threshold` | Successful checks required to recover a backend |
 | `backends` | List of backend host and port combinations |
+| `weight` | Relative backend weight for Weighted Round Robin; defaults to 1 |
 
-The configuration loader validates required fields, port ranges, health-check thresholds, and duplicate backend entries.
+Supported strategy values:
+
+| Strategy | YAML value |
+|---|---|
+| Round Robin | `round_robin` |
+| Random | `random` |
+| Weighted Round Robin | `weighted_round_robin` |
+
+Round Robin is the default strategy when the `load_balancing` section is omitted.
+
+The configuration loader validates required fields, port ranges, health-check thresholds, duplicate backend entries, strategy names, and backend weights.
 
 You can also supply a different configuration file:
 
@@ -216,41 +253,43 @@ The default configuration listens on:
 127.0.0.1:8080
 ```
 
-Configured backends:
-
-```text
-127.0.0.1:9001
-127.0.0.1:9002
-127.0.0.1:9004
-```
-
 ## Run Test Backends
 
-Open three separate terminals. Run the following script in each terminal, changing `9001` to `9002` and `9004` for the other backends.
+Start all three test backends from one terminal:
 
 ```bash
-PORT=9001 python3 - <<'PY'
-import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-port = int(os.environ["PORT"])
+python3 - <<'PY'
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread, Event
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             body = b"OK"
         else:
-            body = f"Backend {port} received: {self.path}\n".encode()
+            body = f"Backend {self.server.server_port} received: {self.path}\n".encode()
 
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-print(f"Backend listening on {port}")
-HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    def log_message(self, fmt, *args):
+        print(f"[Backend {self.server.server_port}] {fmt % args}")
+
+servers = []
+
+for port in (9001, 9002, 9004):
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    servers.append(server)
+    print(f"Backend listening on {port}")
+
+Event().wait()
 PY
 ```
+
+Keep this terminal running while testing the proxy.
 
 ## Testing
 
@@ -260,15 +299,45 @@ Send a request through the proxy:
 curl -i http://127.0.0.1:8080/test
 ```
 
-Test round-robin distribution:
+### Test Round Robin
+
+Set the strategy to `round_robin` in `config/aetherproxy.yaml`, restart AetherProxy, and send multiple requests:
 
 ```bash
-for i in {1..6}; do
+for i in {1..9}; do
     curl -s http://127.0.0.1:8080/test
 done
 ```
 
-Check backend health endpoints:
+With all backends healthy, requests should be distributed equally.
+
+### Test Random
+
+Set the strategy to `random`, restart AetherProxy, and send multiple requests:
+
+```bash
+for i in {1..30}; do
+    curl -s http://127.0.0.1:8080/test
+done
+```
+
+Requests should be distributed randomly across healthy backends.
+
+### Test Weighted Round Robin
+
+Set the strategy to `weighted_round_robin`, restart AetherProxy, and send multiple requests:
+
+```bash
+for i in {1..30}; do
+    curl -s http://127.0.0.1:8080/test
+done
+```
+
+With weights 3:2:1, the expected distribution over 30 requests is approximately 15, 10, and 5 requests respectively.
+
+After restarting AetherProxy, allow the active health monitor to complete its required successful checks before sending test traffic.
+
+### Check Backend Health Endpoints
 
 ```bash
 curl -i http://127.0.0.1:9001/health
@@ -308,12 +377,15 @@ tail -f logs/aetherproxy.log
 Implemented:
 
 - HTTP request forwarding
-- Round-robin load balancing
 - Multiple backend support
+- Round Robin load balancing
+- Random load balancing
+- Smooth Weighted Round Robin load balancing
+- Configurable backend weights
 - Passive backend failure detection
 - Active asynchronous HTTP health checks
 - Configurable health-check intervals and thresholds
-- YAML-based server and backend configuration
+- YAML-based server, backend, and load-balancing configuration
 - Configuration validation
 - Custom configuration file support
 - Automatic backend exclusion and recovery
@@ -322,7 +394,6 @@ Implemented:
 
 Planned:
 
-- Configurable load-balancing strategies
 - Connection pooling
 - Metrics and observability
 - Docker support
@@ -330,5 +401,3 @@ Planned:
 - Integration and stress testing
 
 ## License
-
-MIT License.

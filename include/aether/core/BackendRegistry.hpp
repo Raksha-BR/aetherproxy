@@ -1,16 +1,25 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
 namespace aether::core {
 
+enum class LoadBalancingStrategy {
+    RoundRobin,
+    Random,
+    WeightedRoundRobin
+};
+
 struct Backend {
     std::string host;
     std::string port;
+    std::size_t weight{1};
     bool healthy{true};
 
     std::size_t consecutive_successes{0};
@@ -19,7 +28,11 @@ struct Backend {
 
 class BackendRegistry {
 public:
-    explicit BackendRegistry(std::vector<Backend> backends);
+    explicit BackendRegistry(
+        std::vector<Backend> backends,
+        LoadBalancingStrategy strategy =
+            LoadBalancingStrategy::RoundRobin
+    );
 
     std::optional<Backend> next_backend();
 
@@ -40,7 +53,11 @@ public:
 
 private:
     std::vector<Backend> backends_;
+    LoadBalancingStrategy strategy_;
+    std::vector<std::int64_t> current_weights_;
+    std::mt19937 random_engine_;
     std::size_t next_index_{0};
+
     mutable std::mutex mutex_;
 };
 

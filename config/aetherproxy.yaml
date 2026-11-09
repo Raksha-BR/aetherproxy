@@ -2,6 +2,9 @@ server:
   host: 127.0.0.1
   port: 8080
 
+load_balancing:
+  strategy: round_robin
+
 health_check:
   interval_seconds: 5
   timeout_seconds: 2
@@ -11,9 +14,12 @@ health_check:
 backends:
   - host: 127.0.0.1
     port: 9001
+    weight: 3
 
   - host: 127.0.0.1
     port: 9002
+    weight: 2
 
   - host: 127.0.0.1
     port: 9004
+    weight: 1

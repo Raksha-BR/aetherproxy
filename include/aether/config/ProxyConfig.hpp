@@ -13,6 +13,10 @@ struct ProxyConfig {
     std::string server_host;
     unsigned short server_port;
 
+    core::LoadBalancingStrategy load_balancing_strategy{
+        core::LoadBalancingStrategy::RoundRobin
+    };
+
     std::chrono::seconds health_check_interval;
     std::chrono::seconds health_check_timeout;
 

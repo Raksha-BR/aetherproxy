@@ -1,3 +1,4 @@
+
 #include "aether/config/ProxyConfig.hpp"
 
 #include <yaml-cpp/yaml.h>
@@ -52,6 +53,63 @@ unsigned int required_port(
     return port;
 }
 
+core::LoadBalancingStrategy parse_strategy(
+    const YAML::Node& root
+) {
+    const auto load_balancing = root["load_balancing"];
+
+    if (!load_balancing) {
+        return core::LoadBalancingStrategy::RoundRobin;
+    }
+
+    if (!load_balancing.IsMap()) {
+        throw std::runtime_error(
+            "load_balancing must be a YAML mapping."
+        );
+    }
+
+    const std::string strategy =
+        required_string(load_balancing, "strategy");
+
+    if (strategy == "round_robin") {
+        return core::LoadBalancingStrategy::RoundRobin;
+    }
+
+    if (strategy == "random") {
+        return core::LoadBalancingStrategy::Random;
+    }
+
+    if (strategy == "weighted_round_robin") {
+        return core::LoadBalancingStrategy::WeightedRoundRobin;
+    }
+
+    throw std::runtime_error(
+        "Unsupported load-balancing strategy: " + strategy
+    );
+}
+
+std::size_t parse_weight(const YAML::Node& node) {
+    if (!node["weight"]) {
+        return 1;
+    }
+
+    if (!node["weight"].IsScalar()) {
+        throw std::runtime_error(
+            "Backend weight must be a positive integer."
+        );
+    }
+
+    const auto weight = node["weight"].as<std::size_t>();
+
+    if (weight == 0) {
+        throw std::runtime_error(
+            "Backend weight must be greater than zero."
+        );
+    }
+
+    return weight;
+}
+
 } // namespace
 
 ProxyConfig ProxyConfig::load_from_file(const std::string& path) {
@@ -84,6 +142,9 @@ ProxyConfig ProxyConfig::load_from_file(const std::string& path) {
         static_cast<unsigned short>(
             required_port(server, "port")
         );
+
+    config.load_balancing_strategy =
+        parse_strategy(root);
 
     const auto interval =
         health["interval_seconds"].as<unsigned int>();
@@ -126,6 +187,8 @@ ProxyConfig ProxyConfig::load_from_file(const std::string& path) {
         const auto port =
             required_port(node, "port");
 
+        const auto weight = parse_weight(node);
+
         const std::string endpoint =
             host + ":" + std::to_string(port);
 
@@ -137,7 +200,8 @@ ProxyConfig ProxyConfig::load_from_file(const std::string& path) {
 
         config.backends.push_back({
             host,
-            std::to_string(port)
+            std::to_string(port),
+            weight
         });
     }
 

@@ -1,6 +1,7 @@
 
 #include "aether/core/BackendRegistry.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <random>
 #include <stdexcept>
@@ -24,8 +25,9 @@ BackendRegistry::BackendRegistry(
     }
 
     if (strategy_ != LoadBalancingStrategy::RoundRobin &&
-        strategy_ != LoadBalancingStrategy::Random &&
-        strategy_ != LoadBalancingStrategy::WeightedRoundRobin) {
+    strategy_ != LoadBalancingStrategy::Random &&
+    strategy_ != LoadBalancingStrategy::WeightedRoundRobin &&
+    strategy_ != LoadBalancingStrategy::LeastConnections) {
         throw std::invalid_argument(
             "Invalid load-balancing strategy."
         );
@@ -51,7 +53,7 @@ BackendRegistry::BackendRegistry(
     }
 }
 
-std::optional<Backend> BackendRegistry::next_backend() {
+std::optional<Backend> BackendRegistry::acquire_backend() {
     std::lock_guard<std::mutex> lock(mutex_);
 
     std::vector<std::size_t> healthy_indices;
@@ -68,6 +70,8 @@ std::optional<Backend> BackendRegistry::next_backend() {
         return std::nullopt;
     }
 
+    std::size_t selected_index = healthy_indices.front();
+
     // Strategy 1: Round Robin
     if (strategy_ == LoadBalancingStrategy::RoundRobin) {
         for (std::size_t i = 0; i < backends_.size(); ++i) {
@@ -75,29 +79,27 @@ std::optional<Backend> BackendRegistry::next_backend() {
                 (next_index_ + i) % backends_.size();
 
             if (backends_[index].healthy) {
+                selected_index = index;
                 next_index_ = (index + 1) % backends_.size();
-                return backends_[index];
+                break;
             }
         }
     }
 
     // Strategy 2: Random
-    if (strategy_ == LoadBalancingStrategy::Random) {
+    else if (strategy_ == LoadBalancingStrategy::Random) {
         std::uniform_int_distribution<std::size_t> distribution(
             0,
             healthy_indices.size() - 1
         );
 
-        const auto index =
+        selected_index =
             healthy_indices[distribution(random_engine_)];
-
-        return backends_[index];
     }
 
     // Strategy 3: Smooth Weighted Round Robin
-    if (strategy_ == LoadBalancingStrategy::WeightedRoundRobin) {
+    else if (strategy_ == LoadBalancingStrategy::WeightedRoundRobin) {
         std::size_t total_weight = 0;
-        std::size_t selected_index = healthy_indices.front();
 
         for (const auto index : healthy_indices) {
             const auto weight = backends_[index].weight;
@@ -115,11 +117,56 @@ std::optional<Backend> BackendRegistry::next_backend() {
 
         current_weights_[selected_index] -=
             static_cast<std::int64_t>(total_weight);
-
-        return backends_[selected_index];
     }
 
-    return std::nullopt;
+    // Strategy 4: Least Connections
+    else if (strategy_ == LoadBalancingStrategy::LeastConnections) {
+        std::size_t minimum_connections =
+            backends_[healthy_indices.front()].active_connections;
+
+        for (const auto index : healthy_indices) {
+            minimum_connections = std::min(
+                minimum_connections,
+                backends_[index].active_connections
+            );
+        }
+
+        // Round-robin tie-breaking among equally loaded backends.
+        for (std::size_t i = 0; i < backends_.size(); ++i) {
+            const std::size_t index =
+                (next_index_ + i) % backends_.size();
+
+            if (backends_[index].healthy &&
+                backends_[index].active_connections ==
+                    minimum_connections) {
+
+                selected_index = index;
+                next_index_ = (index + 1) % backends_.size();
+                break;
+            }
+        }
+    }
+
+    ++backends_[selected_index].active_connections;
+
+    return backends_[selected_index];
+}
+
+void BackendRegistry::release_backend(
+    const std::string& host,
+    const std::string& port
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (auto& backend : backends_) {
+        if (backend.host == host && backend.port == port) {
+            if (backend.active_connections > 0) {
+                --backend.active_connections;
+            }
+
+            return;
+        }
+    }
 }
 
 bool BackendRegistry::mark_healthy(

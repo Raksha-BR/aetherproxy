@@ -11,6 +11,10 @@ health_check:
   failure_threshold: 2
   success_threshold: 2
 
+request:
+  timeout_seconds: 5
+  max_retries: 2
+
 backends:
   - host: 127.0.0.1
     port: 9001

@@ -20,6 +20,9 @@ struct ProxyConfig {
     std::chrono::seconds health_check_interval;
     std::chrono::seconds health_check_timeout;
 
+    std::chrono::seconds request_timeout{5};
+    std::size_t max_retries{2};
+
     std::size_t failure_threshold;
     std::size_t success_threshold;
 

@@ -13,7 +13,8 @@ namespace aether::core {
 enum class LoadBalancingStrategy {
     RoundRobin,
     Random,
-    WeightedRoundRobin
+    WeightedRoundRobin,
+    LeastConnections
 };
 
 struct Backend {
@@ -24,6 +25,7 @@ struct Backend {
 
     std::size_t consecutive_successes{0};
     std::size_t consecutive_failures{0};
+    std::size_t active_connections{0};
 };
 
 class BackendRegistry {
@@ -34,7 +36,12 @@ public:
             LoadBalancingStrategy::RoundRobin
     );
 
-    std::optional<Backend> next_backend();
+    std::optional<Backend> acquire_backend();
+
+void release_backend(
+    const std::string& host,
+    const std::string& port
+);
 
     bool mark_healthy(const std::string& host, const std::string& port);
     bool mark_unhealthy(const std::string& host, const std::string& port);

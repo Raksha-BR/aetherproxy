@@ -20,40 +20,59 @@ namespace aether::networking
           connection_pool_(std::move(connection_pool)),
           request_timeout_(request_timeout),
           max_retries_(max_retries),
+          strand_(net::make_strand(socket.get_executor())),
           socket_(std::move(socket)),
           upstream_timer_(socket_.get_executor())
     {
     }
 
-    void HttpSession::run()
+   void HttpSession::run()
     {
-        if (metrics_)
-        {
-            metrics_->connection_opened();
-            connection_counted_ = true;
-        }
+        auto self = shared_from_this();
 
-        std::cerr << "[AetherProxy] Session started\n";
-        read_request();
+        net::dispatch(
+            strand_,
+            [self]()
+            {
+                if (self->shutting_down_)
+                {
+                    return;
+                }
+
+                if (self->metrics_)
+                {
+                    self->metrics_->connection_opened();
+                    self->connection_counted_ = true;
+                }
+
+                std::cerr << "[AetherProxy] Session started\n";
+                self->read_request();
+            });
     }
 
     void HttpSession::stop()
     {
-        if (shutting_down_)
-        {
-            return;
-        }
+        auto self = shared_from_this();
 
-        shutting_down_ = true;
+        net::dispatch(
+            strand_,
+            [self]()
+            {
+                if (self->shutting_down_)
+                {
+                    return;
+                }
 
-        // No request is being processed: this session is idle.
-        if (!request_in_progress_)
-        {
-            std::cerr << "[AetherProxy] Closing idle client session\n";
-            close();
-        }
+                self->shutting_down_ = true;
+
+                // No request is being processed: this session is idle.
+                if (!self->request_in_progress_)
+                {
+                    std::cerr << "[AetherProxy] Closing idle client session\n";
+                    self->close();
+                }
+            });
     }
-
     void HttpSession::read_request()
     {
         auto self = shared_from_this();
@@ -62,10 +81,12 @@ namespace aether::networking
             socket_,
             buffer_,
             request_,
-            [self](beast::error_code error, std::size_t bytes)
-            {
-                self->on_read(error, bytes);
-            });
+            net::bind_executor(
+                strand_,
+                [self](beast::error_code error, std::size_t bytes)
+                {
+                    self->on_read(error, bytes);
+                }));
     }
 
     void HttpSession::on_read(
@@ -153,13 +174,14 @@ namespace aether::networking
 
         pool_request_id_ = connection_pool_->async_acquire(
             current_backend_,
-            [self](
-                boost::system::error_code error,
-                BackendConnectionPool::Connection connection)
-            {
-                self->pool_request_id_ = 0;
-                self->on_pool_acquired(error, std::move(connection));
-            });
+            net::bind_executor(
+                strand_,
+                [self](boost::system::error_code error,
+                    BackendConnectionPool::Connection connection)
+                {
+                    self->pool_request_id_ = 0;
+                    self->on_pool_acquired(error, std::move(connection));
+                }));
     }
 
     void HttpSession::on_pool_acquired(
@@ -226,10 +248,12 @@ namespace aether::networking
         http::async_write(
             *upstream_connection_,
             request_,
-            [self](beast::error_code error, std::size_t bytes)
-            {
-                self->on_forward(error, bytes);
-            });
+            net::bind_executor(
+                strand_,
+                [self](beast::error_code error, std::size_t bytes)
+                {
+                    self->on_forward(error, bytes);
+                }));
     }
 
     void HttpSession::on_forward(
@@ -266,10 +290,12 @@ namespace aether::networking
             *upstream_connection_,
             upstream_buffer_,
             response_,
-            [self](beast::error_code error, std::size_t bytes)
-            {
-                self->on_backend_read(error, bytes);
-            });
+            net::bind_executor(
+                strand_,
+                [self](beast::error_code error, std::size_t bytes)
+                {
+                    self->on_backend_read(error, bytes);
+                }));
     }
 
     void HttpSession::on_backend_read(
@@ -329,10 +355,12 @@ namespace aether::networking
         http::async_write(
             socket_,
             response_,
-            [self](beast::error_code error, std::size_t bytes)
-            {
-                self->on_client_write(error, bytes);
-            });
+            net::bind_executor(
+                strand_,
+                [self](beast::error_code error, std::size_t bytes)
+                {
+                    self->on_client_write(error, bytes);
+                }));
     }
 
     void HttpSession::on_client_write(
@@ -383,33 +411,35 @@ namespace aether::networking
 
         upstream_timer_.expires_after(request_timeout_);
         upstream_timer_.async_wait(
-            [self](beast::error_code error)
-            {
-                if (error == net::error::operation_aborted)
+            net::bind_executor(
+                strand_,
+                [self](beast::error_code error)
                 {
-                    return;
-                }
+                    if (error == net::error::operation_aborted)
+                    {
+                        return;
+                    }
 
-                if (error || self->response_started_)
-                {
-                    return;
-                }
+                    if (error || self->response_started_)
+                    {
+                        return;
+                    }
 
-                std::cerr << "[AetherProxy] Backend request timed out\n";
+                    std::cerr << "[AetherProxy] Backend request timed out\n";
 
-                if (self->pool_request_id_ != 0)
-                {
-                    self->connection_pool_->cancel_acquire(
-                        self->current_backend_,
-                        self->pool_request_id_);
+                    if (self->pool_request_id_ != 0)
+                    {
+                        self->connection_pool_->cancel_acquire(
+                            self->current_backend_,
+                            self->pool_request_id_);
 
-                    self->pool_request_id_ = 0;
-                }
+                        self->pool_request_id_ = 0;
+                    }
 
-                self->send_error(
-                    http::status::gateway_timeout,
-                    "Backend server did not respond in time.");
-            });
+                    self->send_error(
+                        http::status::gateway_timeout,
+                        "Backend server did not respond in time.");
+                }));
     }
 
     void HttpSession::cancel_upstream_timeout()

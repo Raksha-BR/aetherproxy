@@ -16,13 +16,15 @@ namespace aether::networking
         std::chrono::seconds request_timeout,
         std::size_t max_retries,
         std::shared_ptr<aether::core::ProxyMetrics> metrics)
-        : io_context_(io_context),
-          registry_(std::move(registry)),
-          metrics_(std::move(metrics)),
-          connection_pool_(std::move(connection_pool)),
-          request_timeout_(request_timeout),
-          max_retries_(max_retries),
-          acceptor_(io_context)
+        : strand_(net::make_strand(
+            net::any_io_executor(io_context.get_executor()))),
+        io_context_(io_context),
+        registry_(std::move(registry)),
+        metrics_(std::move(metrics)),
+        connection_pool_(std::move(connection_pool)),
+        request_timeout_(request_timeout),
+        max_retries_(max_retries),
+        acceptor_(io_context)
     {
 
         beast::error_code error;
@@ -62,36 +64,49 @@ namespace aether::networking
 
     void HttpListener::run()
     {
-        accept_connection();
+        auto self = shared_from_this();
+
+        net::dispatch(
+            strand_,
+            [self]()
+            {
+                self->accept_connection();
+            });
     }
 
     void HttpListener::stop()
     {
-        if (stopping_)
-        {
-            return;
-        }
+        auto self = shared_from_this();
 
-        stopping_ = true;
-
-        beast::error_code ignored;
-        acceptor_.cancel(ignored);
-        acceptor_.close(ignored);
-
-        for (auto &weak_session : sessions_)
-        {
-            if (auto session = weak_session.lock())
+        net::dispatch(
+            strand_,
+            [self]()
             {
-                session->stop();
-            }
-        }
+                if (self->stopping_)
+                {
+                    return;
+                }
 
-        sessions_.clear();
+                self->stopping_ = true;
 
-        std::cout
-            << "[AetherProxy] Listener stopped accepting connections\n";
+                beast::error_code ignored;
+                self->acceptor_.cancel(ignored);
+                self->acceptor_.close(ignored);
+
+                for (auto &weak_session : self->sessions_)
+                {
+                    if (auto session = weak_session.lock())
+                    {
+                        session->stop();
+                    }
+                }
+
+                self->sessions_.clear();
+
+                std::cout
+                    << "[AetherProxy] Listener stopped accepting connections\n";
+            });
     }
-
     void HttpListener::accept_connection()
     {
         if (stopping_)
@@ -103,47 +118,49 @@ namespace aether::networking
 
         acceptor_.async_accept(
             io_context_,
-            [self](
-                beast::error_code error,
-                tcp::socket socket)
-            {
-                if (!error && !self->stopping_)
+            net::bind_executor(
+                strand_,
+                [self](
+                    beast::error_code error,
+                    tcp::socket socket)
                 {
-                    std::cerr
-                        << "[AetherProxy] Accepted client connection\n";
+                    if (!error && !self->stopping_)
+                    {
+                        std::cerr
+                            << "[AetherProxy] Accepted client connection\n";
 
-                    // Remove expired sessions before tracking new ones.
-                    std::erase_if(
-                        self->sessions_,
-                        [](const std::weak_ptr<HttpSession> &session)
-                        {
-                            return session.expired();
-                        });
+                        // Remove expired sessions before tracking new ones.
+                        std::erase_if(
+                            self->sessions_,
+                            [](const std::weak_ptr<HttpSession> &session)
+                            {
+                                return session.expired();
+                            });
 
-                    auto session = std::make_shared<HttpSession>(
-                        std::move(socket),
-                        self->registry_,
-                        self->connection_pool_,
-                        self->request_timeout_,
-                        self->max_retries_,
-                        self->metrics_);
+                        auto session = std::make_shared<HttpSession>(
+                            std::move(socket),
+                            self->registry_,
+                            self->connection_pool_,
+                            self->request_timeout_,
+                            self->max_retries_,
+                            self->metrics_);
 
-                    self->sessions_.push_back(session);
-                    session->run();
-                }
-                else if (error && !self->stopping_ &&
-                         error != net::error::operation_aborted)
-                {
-                    std::cerr
-                        << "[AetherProxy] Accept error: "
-                        << error.message() << '\n';
-                }
+                        self->sessions_.push_back(session);
+                        session->run();
+                    }
+                    else if (error && !self->stopping_ &&
+                            error != net::error::operation_aborted)
+                    {
+                        std::cerr
+                            << "[AetherProxy] Accept error: "
+                            << error.message() << '\n';
+                    }
 
-                if (!self->stopping_)
-                {
-                    self->accept_connection();
-                }
-            });
+                    if (!self->stopping_)
+                    {
+                        self->accept_connection();
+                    }
+                }));
     }
 
 } // namespace aether::networking

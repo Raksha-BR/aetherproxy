@@ -1,4 +1,5 @@
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import argparse
 
 
 class BackendHandler(BaseHTTPRequestHandler):
@@ -17,7 +18,11 @@ class BackendHandler(BaseHTTPRequestHandler):
         print(f"[Backend] {format % args}")
 
 
-server = HTTPServer(("127.0.0.1", 9001), BackendHandler)
+parser = argparse.ArgumentParser()
+parser.add_argument("--port", type=int, default=9001)
+args = parser.parse_args()
 
-print("[Backend] Listening on 127.0.0.1:9001")
+server = ThreadingHTTPServer(("127.0.0.1", args.port), BackendHandler)
+
+print(f"[Backend] Listening on 127.0.0.1:{args.port}")
 server.serve_forever()

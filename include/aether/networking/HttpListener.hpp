@@ -41,6 +41,9 @@ HttpListener(
 private:
     void accept_connection();
 
+    // Serializes listener accept, session tracking, and shutdown handlers.
+    net::strand<net::any_io_executor> strand_;
+
     net::io_context& io_context_;
 
 std::shared_ptr<aether::core::BackendRegistry> registry_;

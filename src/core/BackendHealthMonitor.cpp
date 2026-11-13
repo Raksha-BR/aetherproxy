@@ -8,303 +8,370 @@
 #include <stdexcept>
 #include <utility>
 
-namespace aether::core {
+namespace aether::core
+{
+    namespace
+    {
+        namespace net = boost::asio;
+        namespace beast = boost::beast;
+        namespace http = beast::http;
 
-namespace {
+        using tcp = net::ip::tcp;
 
-namespace net = boost::asio;
-namespace beast = boost::beast;
-namespace http = beast::http;
-
-using tcp = net::ip::tcp;
-
-struct CheckOperation
-    : std::enable_shared_from_this<CheckOperation> {
-
-    CheckOperation(
-        net::io_context& io,
-        Backend backend,
-        std::chrono::seconds timeout,
-        std::function<void(bool)> completion
-    )
-        : backend(std::move(backend)),
-          resolver(io),
-          socket(io),
-          timer(io),
-          timeout(timeout),
-          completion(std::move(completion)) {
-
-        request.version(11);
-        request.method(http::verb::get);
-        request.target("/health");
-        request.set(http::field::host, this->backend.host);
-        request.set(http::field::user_agent, "AetherProxy-HealthMonitor");
-        request.keep_alive(false);
-    }
-
-    void start() {
-        auto self = shared_from_this();
-
-        timer.expires_after(timeout);
-
-        timer.async_wait([self](boost::system::error_code error) {
-            if (!error) {
-                self->finish(false);
+        struct CheckOperation
+            : std::enable_shared_from_this<CheckOperation>
+        {
+            CheckOperation(
+                net::io_context &io,
+                Backend backend,
+                std::chrono::seconds timeout,
+                std::function<void(bool)> completion)
+                : backend(std::move(backend)),
+                  strand(net::make_strand(
+                      net::any_io_executor(io.get_executor()))),
+                  resolver(io),
+                  socket(io),
+                  timer(io),
+                  timeout(timeout),
+                  completion(std::move(completion))
+            {
+                request.version(11);
+                request.method(http::verb::get);
+                request.target("/health");
+                request.set(http::field::host, this->backend.host);
+                request.set(
+                    http::field::user_agent,
+                    "AetherProxy-HealthMonitor");
+                request.keep_alive(false);
             }
-        });
 
-        resolver.async_resolve(
-            backend.host,
-            backend.port,
-            [self](
-                boost::system::error_code error,
-                tcp::resolver::results_type results
-            ) {
-                if (self->completed) {
-                    return;
-                }
+            void start()
+            {
+                auto self = shared_from_this();
 
-                if (error) {
-                    self->finish(false);
-                    return;
-                }
+                net::dispatch(strand, [self]()
+                {
+                    self->timer.expires_after(self->timeout);
 
-                net::async_connect(
+                    self->timer.async_wait(
+                        net::bind_executor(
+                            self->strand,
+                            [self](boost::system::error_code error)
+                            {
+                                if (!error)
+                                {
+                                    self->finish(false);
+                                }
+                            }));
+
+                    self->resolver.async_resolve(
+                        self->backend.host,
+                        self->backend.port,
+                        net::bind_executor(
+                            self->strand,
+                            [self](
+                                boost::system::error_code error,
+                                tcp::resolver::results_type results)
+                            {
+                                if (self->completed)
+                                {
+                                    return;
+                                }
+
+                                if (error)
+                                {
+                                    self->finish(false);
+                                    return;
+                                }
+
+                                net::async_connect(
+                                    self->socket,
+                                    results,
+                                    net::bind_executor(
+                                        self->strand,
+                                        [self](
+                                            boost::system::error_code connect_error,
+                                            const tcp::endpoint &)
+                                        {
+                                            if (self->completed)
+                                            {
+                                                return;
+                                            }
+
+                                            if (connect_error)
+                                            {
+                                                self->finish(false);
+                                                return;
+                                            }
+
+                                            self->send_health_request();
+                                        }));
+                            }));
+                });
+            }
+
+            void send_health_request()
+            {
+                auto self = shared_from_this();
+
+                http::async_write(
                     self->socket,
-                    results,
-                    [self](
-                        boost::system::error_code connect_error,
-                        const tcp::endpoint&
-                    ) {
-                        if (self->completed) {
-                            return;
-                        }
+                    self->request,
+                    net::bind_executor(
+                        self->strand,
+                        [self](
+                            boost::system::error_code error,
+                            std::size_t)
+                        {
+                            if (self->completed)
+                            {
+                                return;
+                            }
 
-                        if (connect_error) {
-                            self->finish(false);
-                            return;
-                        }
+                            if (error)
+                            {
+                                self->finish(false);
+                                return;
+                            }
 
-                        self->send_health_request();
-                    }
-                );
+                            self->read_health_response();
+                        }));
             }
-        );
-    }
 
-    void send_health_request() {
-        auto self = shared_from_this();
+            void read_health_response()
+            {
+                auto self = shared_from_this();
 
-        http::async_write(
-            socket,
-            request,
-            [self](
-                boost::system::error_code error,
-                std::size_t
-            ) {
-                if (self->completed) {
+                http::async_read(
+                    self->socket,
+                    self->buffer,
+                    self->response,
+                    net::bind_executor(
+                        self->strand,
+                        [self](
+                            boost::system::error_code error,
+                            std::size_t)
+                        {
+                            if (self->completed)
+                            {
+                                return;
+                            }
+
+                            const bool healthy =
+                                !error &&
+                                self->response.result() == http::status::ok;
+
+                            self->finish(healthy);
+                        }));
+            }
+
+            void finish(bool healthy)
+            {
+                if (completed)
+                {
                     return;
                 }
 
-                if (error) {
-                    self->finish(false);
-                    return;
+                completed = true;
+
+                boost::system::error_code ignored;
+
+                timer.cancel(ignored);
+                resolver.cancel();
+                socket.close(ignored);
+
+                if (completion)
+                {
+                    completion(healthy);
                 }
-
-                self->read_health_response();
             }
-        );
+
+            Backend backend;
+
+            net::strand<net::any_io_executor> strand;
+            tcp::resolver resolver;
+            tcp::socket socket;
+            net::steady_timer timer;
+
+            beast::flat_buffer buffer;
+
+            http::request<http::empty_body> request;
+            http::response<http::string_body> response;
+
+            std::chrono::seconds timeout;
+            std::function<void(bool)> completion;
+
+            bool completed{false};
+        };
     }
 
-    void read_health_response() {
-        auto self = shared_from_this();
-
-        http::async_read(
-            socket,
-            buffer,
-            response,
-            [self](
-                boost::system::error_code error,
-                std::size_t
-            ) {
-                if (self->completed) {
-                    return;
-                }
-
-                const bool healthy =
-                    !error &&
-                    self->response.result() == http::status::ok;
-
-                self->finish(healthy);
-            }
-        );
-    }
-
-    void finish(bool healthy) {
-        if (completed) {
-            return;
-        }
-
-        completed = true;
-
-        boost::system::error_code ignored;
-
-        timer.cancel(ignored);
-        resolver.cancel();
-        socket.close(ignored);
-
-        if (completion) {
-            completion(healthy);
-        }
-    }
-
-    Backend backend;
-
-    tcp::resolver resolver;
-    tcp::socket socket;
-    net::steady_timer timer;
-
-    beast::flat_buffer buffer;
-
-    http::request<http::empty_body> request;
-    http::response<http::string_body> response;
-
-    std::chrono::seconds timeout;
-    std::function<void(bool)> completion;
-
-    bool completed{false};
-};
-
-} // namespace
-
-BackendHealthMonitor::BackendHealthMonitor(
-    net::io_context& io_context,
-    std::shared_ptr<BackendRegistry> registry,
+    BackendHealthMonitor::BackendHealthMonitor(
+        net::io_context &io_context,
+        std::shared_ptr<BackendRegistry> registry,
         std::chrono::seconds interval,
         std::chrono::seconds timeout,
         std::size_t success_threshold,
-        std::size_t failure_threshold
-)
-    : io_context_(io_context),
-      registry_(std::move(registry)),
-      timer_(io_context),
-     interval_(interval),
-     timeout_(timeout),
-     success_threshold_(success_threshold),
-     failure_threshold_(failure_threshold) {
+        std::size_t failure_threshold)
+        : strand_(net::make_strand(
+              net::any_io_executor(io_context.get_executor()))),
+          io_context_(io_context),
+          registry_(std::move(registry)),
+          timer_(io_context),
+          interval_(interval),
+          timeout_(timeout),
+          success_threshold_(success_threshold),
+          failure_threshold_(failure_threshold)
+    {
+        if (!registry_)
+        {
+            throw std::invalid_argument(
+                "Backend registry cannot be null.");
+        }
 
-    if (!registry_) {
-        throw std::invalid_argument(
-            "Backend registry cannot be null."
-        );
+        if (interval_.count() <= 0 ||
+            timeout_.count() <= 0 ||
+            success_threshold_ == 0 ||
+            failure_threshold_ == 0)
+        {
+            throw std::invalid_argument(
+                "Health check settings and thresholds must be positive.");
+        }
     }
 
-    if (interval_.count() <= 0 ||
-        timeout_.count() <= 0 ||
-        success_threshold_ == 0 ||
-        failure_threshold_ == 0) {
-        throw std::invalid_argument(
-            "Health check settings and thresholds must be positive."
-        );
-    }
-}
+    void BackendHealthMonitor::start()
+    {
+        auto self = shared_from_this();
 
-void BackendHealthMonitor::start() {
-    if (!stopped_) {
-        return;
-    }
-
-    stopped_ = false;
-    check_backends();
-}
-
-void BackendHealthMonitor::stop() {
-    stopped_ = true;
-
-    boost::system::error_code ignored;
-    timer_.cancel(ignored);
-}
-
-void BackendHealthMonitor::check_backends() {
-    if (stopped_ || cycle_running_) {
-        return;
-    }
-
-    const auto backends = registry_->all_backends();
-
-    if (backends.empty()) {
-        schedule_next_check();
-        return;
-    }
-
-    cycle_running_ = true;
-    pending_checks_ = backends.size();
-
-    auto self = shared_from_this();
-
-    for (const auto& backend : backends) {
-                auto completion = [self, backend](bool success) {
-            const auto transition =
-                self->registry_->record_health_check(
-                    backend.host,
-                    backend.port,
-                    success,
-                    self->success_threshold_,
-                    self->failure_threshold_
-                );
-
-            if (transition.has_value()) {
-                if (*transition) {
-                    std::cout << "[HealthMonitor] Backend recovered: ";
-                } else {
-                    std::cout << "[HealthMonitor] Backend unhealthy: ";
-                }
-
-                std::cout
-                    << backend.host << ":" << backend.port << '\n';
+        net::dispatch(strand_, [self]()
+        {
+            if (!self->stopped_)
+            {
+                return;
             }
 
-            self->on_check_complete();
-        };
-
-        std::make_shared<CheckOperation>(
-            io_context_,
-            backend,
-            timeout_,
-            std::move(completion)
-        )->start();
-    }
-}
-
-void BackendHealthMonitor::on_check_complete() {
-    if (pending_checks_ == 0) {
-        return;
+            self->stopped_ = false;
+            self->check_backends();
+        });
     }
 
-    --pending_checks_;
+    void BackendHealthMonitor::stop()
+    {
+        auto self = shared_from_this();
 
-    if (pending_checks_ == 0) {
-        cycle_running_ = false;
-        schedule_next_check();
+        net::dispatch(strand_, [self]()
+        {
+            self->stopped_ = true;
+
+            boost::system::error_code ignored;
+            self->timer_.cancel(ignored);
+        });
     }
-}
 
-void BackendHealthMonitor::schedule_next_check() {
-    if (stopped_ || cycle_running_) {
-        return;
-    }
-
-    auto self = shared_from_this();
-
-    timer_.expires_after(interval_);
-
-    timer_.async_wait([self](boost::system::error_code error) {
-        if (error || self->stopped_) {
+    void BackendHealthMonitor::check_backends()
+    {
+        if (stopped_ || cycle_running_)
+        {
             return;
         }
 
-        self->check_backends();
-    });
-}
+        const auto backends = registry_->all_backends();
+
+        if (backends.empty())
+        {
+            schedule_next_check();
+            return;
+        }
+
+        cycle_running_ = true;
+        pending_checks_ = backends.size();
+
+        auto self = shared_from_this();
+
+        for (const auto &backend : backends)
+        {
+            auto completion = [self, backend](bool success)
+            {
+                net::dispatch(
+                    self->strand_,
+                    [self, backend, success]()
+                    {
+                        const auto transition =
+                            self->registry_->record_health_check(
+                                backend.host,
+                                backend.port,
+                                success,
+                                self->success_threshold_,
+                                self->failure_threshold_);
+
+                        if (transition.has_value())
+                        {
+                            if (*transition)
+                            {
+                                std::cout
+                                    << "[HealthMonitor] Backend recovered: ";
+                            }
+                            else
+                            {
+                                std::cout
+                                    << "[HealthMonitor] Backend unhealthy: ";
+                            }
+
+                            std::cout
+                                << backend.host << ":" << backend.port << '\n';
+                        }
+
+                        self->on_check_complete();
+                    });
+            };
+
+            std::make_shared<CheckOperation>(
+                io_context_,
+                backend,
+                timeout_,
+                std::move(completion))
+                ->start();
+        }
+    }
+
+    void BackendHealthMonitor::on_check_complete()
+    {
+        if (pending_checks_ == 0)
+        {
+            return;
+        }
+
+        --pending_checks_;
+
+        if (pending_checks_ == 0)
+        {
+            cycle_running_ = false;
+            schedule_next_check();
+        }
+    }
+
+    void BackendHealthMonitor::schedule_next_check()
+    {
+        if (stopped_ || cycle_running_)
+        {
+            return;
+        }
+
+        auto self = shared_from_this();
+
+        timer_.expires_after(interval_);
+
+        timer_.async_wait(
+            net::bind_executor(
+                strand_,
+                [self](boost::system::error_code error)
+                {
+                    if (error || self->stopped_)
+                    {
+                        return;
+                    }
+
+                    self->check_backends();
+                }));
+    }
 
 } // namespace aether::core

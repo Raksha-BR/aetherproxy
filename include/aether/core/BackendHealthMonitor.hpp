@@ -30,6 +30,9 @@ private:
     void on_check_complete();
     void schedule_next_check();
 
+    // Serializes health-check scheduling and monitor state changes.
+    boost::asio::strand<boost::asio::any_io_executor> strand_;
+
     boost::asio::io_context& io_context_;
     std::shared_ptr<BackendRegistry> registry_;
     boost::asio::steady_timer timer_;

@@ -91,8 +91,11 @@ namespace aether::networking
 
         BackendConnectionPool::RequestId pool_request_id_{0};
 
+        // Serializes all asynchronous handlers belonging to this session.
+        net::strand<net::any_io_executor> strand_;
         // Client and upstream connections
         tcp::socket socket_;
+
         BackendConnectionPool::Connection upstream_connection_;
         // Upstream timeout management
         net::steady_timer upstream_timer_;

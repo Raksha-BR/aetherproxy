@@ -1,17 +1,19 @@
+
 #include "aether/core/ProxyServer.hpp"
 #include "aether/networking/BackendConnectionPool.hpp"
 
 #include <iostream>
 #include <csignal>
+#include <thread>
 #include <utility>
 
 namespace aether::core
 {
 
     ProxyServer::ProxyServer(const config::ProxyConfig& config)
-    : io_context_(1),
-      signals_(io_context_, SIGINT, SIGTERM),
-      metrics_(std::make_shared<ProxyMetrics>()),
+        : io_context_(2),
+          signals_(io_context_, SIGINT, SIGTERM),
+          metrics_(std::make_shared<ProxyMetrics>()),
           registry_(
               std::make_shared<BackendRegistry>(
                   config.backends,
@@ -36,15 +38,14 @@ namespace aether::core
                 config.failure_threshold);
 
         listener_ =
-    std::make_shared<networking::HttpListener>(
-        io_context_,
-        endpoint,
-        registry_,
-        connection_pool_,
-        config.request_timeout,
-        config.max_retries,
-         metrics_
-    );
+            std::make_shared<networking::HttpListener>(
+                io_context_,
+                endpoint,
+                registry_,
+                connection_pool_,
+                config.request_timeout,
+                config.max_retries,
+                metrics_);
     }
 
     void ProxyServer::run()
@@ -54,7 +55,7 @@ namespace aether::core
 
         signals_.async_wait(
             [this](
-                const boost::system::error_code &error,
+                const boost::system::error_code& error,
                 int signal_number)
             {
                 if (error)
@@ -74,8 +75,17 @@ namespace aether::core
         health_monitor_->start();
         listener_->run();
 
+        // Run the same io_context on two threads.
+        std::jthread worker(
+            [this]()
+            {
+                io_context_.run();
+            });
+
+        // The main thread also processes asynchronous handlers.
         io_context_.run();
 
+        // jthread joins automatically when it goes out of scope.
         std::cout
             << "[AetherProxy] Shutdown complete.\n";
     }

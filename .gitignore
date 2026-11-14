@@ -25,3 +25,10 @@ logs/
 # Python generated files
 __pycache__/
 *.py[cod]
+
+# Python environments and tooling
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/

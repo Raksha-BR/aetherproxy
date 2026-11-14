@@ -1,3 +1,0 @@
-http://localhost:80 {
-    reverse_proxy aether-backend:8080
-}

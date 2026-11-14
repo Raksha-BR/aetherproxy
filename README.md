@@ -1,53 +1,98 @@
 # AetherProxy
 
-AetherProxy is a C++20 asynchronous HTTP reverse proxy that distributes incoming client requests across multiple backend servers using configurable load-balancing strategies.
+AetherProxy is a C++20 asynchronous HTTP reverse proxy designed to distribute client requests across multiple backend servers. It combines configurable load balancing, active health monitoring, backend connection pooling, request timeouts, and Prometheus-compatible metrics.
 
-The project demonstrates networking, asynchronous I/O, backend health monitoring, failure detection, automatic recovery, and YAML-based configuration management.
+The project focuses on practical systems programming concepts including asynchronous networking, connection lifecycle management, concurrency, failure handling, and observability.
 
 ## Features
 
-- HTTP reverse proxy using Boost.Asio and Boost.Beast.
-- Configurable Round Robin, Random, and Weighted Round Robin load balancing.
-- Smooth weighted scheduling based on backend weights.
-- Passive backend failure detection.
-- Active asynchronous HTTP health monitoring using `GET /health`.
-- Configurable health-check intervals, timeouts, and recovery thresholds.
-- YAML-based server, backend, and load-balancing configuration.
-- Configurable backend weights.
-- Automatic unhealthy backend exclusion and recovery.
-- Upstream request and health-check timeouts.
+### Networking and concurrency
+- Asynchronous HTTP request forwarding using Boost.Asio and Boost.Beast.
+- Multiple event-loop threads for concurrent request processing.
+- Strand-based handler serialization for session, listener, and health-monitor operations.
+- Graceful shutdown on `SIGINT` and `SIGTERM`.
+
+### Load balancing
+- Round Robin.
+- Random.
+- Smooth Weighted Round Robin.
+- Least Connections.
+- Automatic exclusion of unhealthy backends.
+
+### Backend health monitoring
+- Active asynchronous HTTP health checks using `GET /health`.
+- Passive failure detection during backend communication.
+- Configurable health-check interval, timeout, failure threshold, and recovery threshold.
+- Automatic backend recovery after consecutive successful checks.
+
+### Connection management
+- Per-backend connection pools.
+- Configurable maximum connection capacity in the pool implementation.
+- Exclusive connection leases for requests.
+- Reuse of eligible HTTP keep-alive connections.
+- Queuing when a backend connection limit is reached.
+- Cancellation of queued acquisition requests.
+
+### Reliability
+- Configurable upstream request timeout.
+- Configurable retry count for eligible backend connection-acquisition failures.
+- HTTP `502 Bad Gateway`, `503 Service Unavailable`, and `504 Gateway Timeout` error handling.
+- Avoids blindly retrying requests after they may have reached the backend.
+
+### Observability
+- Prometheus-compatible metrics endpoint at `/metrics`.
+- Request counters and request-duration aggregates.
+- Active client connection tracking.
+- Backend health metrics.
+- Backend connection-pool metrics.
 - Runtime logging.
-- Configuration validation, including invalid ports, duplicate backend entries, invalid strategies, and backend weights.
 
 ## Tech Stack
 
-- C++20
-- Boost.Asio
-- Boost.Beast
-- yaml-cpp
-- CMake
-- Linux / Ubuntu (WSL2)
+- **Language:** C++20
+- **Networking:** Boost.Asio, Boost.Beast
+- **Configuration:** yaml-cpp
+- **Build system:** CMake
+- **Testing:** GoogleTest, Python integration tests
+- **Platform:** Linux / Ubuntu / WSL2
 
 ## Architecture
 
 ```text
-Client
-  |
-  v
-AetherProxy HTTP Listener
-  |
-  v
-HTTP Session
-  |
-  v
-Backend Registry ---- Health Monitor
-  |                    |
-  |                    +-- HTTP GET /health
-  |
-  +---- Backend 1 :9001
-  +---- Backend 2 :9002
-  +---- Backend 3 :9004
+                         Client
+                           |
+                           v
+                  AetherProxy Listener
+                           |
+                           v
+                     HTTP Session
+                           |
+                +----------+----------+
+                |                     |
+                v                     v
+          Backend Registry      Connection Pool
+                |                     |
+                v                     v
+         Load Balancer          Backend Connections
+                |                     |
+        +-------+-------+-------------+
+        |       |       |
+        v       v       v
+     Backend  Backend  Backend
+      :9001    :9002    :9004
+
+       Backend Health Monitor
+                  |
+          GET /health checks
+                  |
+          Backend Registry
+
+       Proxy Metrics
+                  |
+               /metrics
 ```
+
+The proxy uses two `io_context` execution threads. Strands serialize operations that share session, listener, and health-monitor state, while mutexes and atomic counters protect shared state where required.
 
 ## Project Structure
 
@@ -55,104 +100,71 @@ Backend Registry ---- Health Monitor
 aetherproxy/
 ├── config/
 │   ├── aetherproxy.yaml
-│   ├── backends.json
-│   └── caddy/
-│       └── Caddyfile
-├── include/aether/
-│   ├── config/
-│   │   └── ProxyConfig.hpp
-│   ├── core/
-│   │   ├── BackendRegistry.hpp
-│   │   ├── BackendHealthMonitor.hpp
-│   │   └── ProxyServer.hpp
-│   └── networking/
-│       ├── HttpListener.hpp
-│       └── HttpSession.hpp
+|
+├── dev/
+│   └── backend/
+│       └── server.py
+|
+├── include/
+│   └── aether/
+│       ├── config/
+│       │   └── ProxyConfig.hpp
+│       ├── core/
+│       │   ├── BackendHealthMonitor.hpp
+│       │   ├── BackendRegistry.hpp
+│       │   ├── ProxyMetrics.hpp
+│       │   └── ProxyServer.hpp
+│       └── networking/
+│           ├── BackendConnectionPool.hpp
+│           ├── HttpListener.hpp
+│           └── HttpSession.hpp
 ├── src/
 │   ├── config/
-│   │   └── ProxyConfig.cpp
 │   ├── core/
-│   │   ├── BackendRegistry.cpp
-│   │   ├── BackendHealthMonitor.cpp
-│   │   └── ProxyServer.cpp
 │   ├── networking/
-│   │   ├── HttpListener.cpp
-│   │   └── HttpSession.cpp
 │   └── main.cpp
+├── tests/
+│   ├── integration/
+│   └── unit/
 ├── CMakeLists.txt
-├── README.md
-└── .gitignore
+└── README.md
 ```
 
-## How It Works
+## Prerequisites
 
-### 1. HTTP Request Forwarding
+On Ubuntu / WSL2:
 
-1. The listener accepts a client connection.
-2. An HTTP session reads the incoming request.
-3. The registry selects a healthy backend using the configured load-balancing strategy.
-4. The proxy forwards the request to that backend.
-5. The backend response is returned to the client.
+```bash
+sudo apt update
 
-### 2. Load-Balancing Strategies
-
-AetherProxy supports three backend selection strategies.
-
-**Round Robin**
-
-Distributes requests sequentially across healthy backends.
-
-```text
-Request 1 -> Backend 9001
-Request 2 -> Backend 9002
-Request 3 -> Backend 9004
-Request 4 -> Backend 9001
+sudo apt install -y \
+    build-essential \
+    cmake \
+    libboost-all-dev \
+    libyaml-cpp-dev \
+    libgtest-dev \
+    python3
 ```
 
-**Random**
+## Build
 
-Selects a healthy backend randomly for each incoming request.
+Clone the repository:
 
-**Weighted Round Robin**
+```bash
+git clone git@github.com:Raksha-BR/aetherproxy.git
+cd aetherproxy
+```
 
-Uses a smooth weighted round-robin scheduling algorithm to distribute requests according to configured backend weights.
+Configure and build:
 
-For example, weights of 3:2:1 produce approximately:
-
-| Backend | Weight | Requests out of 30 |
-|---|---:|---:|
-| 9001 | 3 | 15 |
-| 9002 | 2 | 10 |
-| 9004 | 1 | 5 |
-
-Unhealthy backends are excluded from backend selection.
-
-### 3. Passive Health Detection
-
-Failures during backend DNS resolution, connection, request writing, or response reading can mark a backend unhealthy immediately.
-
-### 4. Active HTTP Health Monitoring
-
-The health monitor periodically sends an HTTP `GET /health` request to each configured backend.
-
-A backend is considered healthy when it responds with HTTP `200 OK`.
-
-Default settings:
-
-| Setting | Value |
-|---|---:|
-| Health-check interval | 5 seconds |
-| Health-check timeout | 2 seconds |
-| Consecutive failures | 2 |
-| Consecutive successes | 2 |
-
-An unhealthy backend requires two consecutive successful active checks before recovery. A healthy backend requires two consecutive failed active checks before becoming unhealthy.
-
-Only health-state transitions are logged.
+```bash
+cmake -S . -B build
+cmake --build build -j2
+```
 
 ## Configuration
 
-AetherProxy loads its configuration from:
+The default configuration is stored in:
 
 ```text
 config/aetherproxy.yaml
@@ -174,6 +186,10 @@ health_check:
   failure_threshold: 2
   success_threshold: 2
 
+request:
+  timeout_seconds: 5
+  max_retries: 2
+
 backends:
   - host: 127.0.0.1
     port: 9001
@@ -188,216 +204,252 @@ backends:
     weight: 1
 ```
 
-### Configuration Options
+### Configuration options
 
 | Setting | Description |
 |---|---|
-| `server.host` | IP address on which the proxy listens |
+| `server.host` | Address on which the proxy listens |
 | `server.port` | Proxy listening port |
 | `load_balancing.strategy` | Backend selection strategy |
-| `interval_seconds` | Time between health-check cycles |
-| `timeout_seconds` | Health-check timeout |
-| `failure_threshold` | Failed checks required to mark a backend unhealthy |
-| `success_threshold` | Successful checks required to recover a backend |
-| `backends` | List of backend host and port combinations |
-| `weight` | Relative backend weight for Weighted Round Robin; defaults to 1 |
+| `health_check.interval_seconds` | Interval between health-check cycles |
+| `health_check.timeout_seconds` | Timeout for an individual health check |
+| `health_check.failure_threshold` | Consecutive failures required for an unhealthy transition |
+| `health_check.success_threshold` | Consecutive successes required for recovery |
+| `request.timeout_seconds` | Upstream request timeout |
+| `request.max_retries` | Maximum configured retries for eligible connection-acquisition failures |
+| `backends` | Configured backend endpoints |
+| `weight` | Relative backend weight for Weighted Round Robin |
 
-Supported strategy values:
+### Supported load-balancing strategies
 
-| Strategy | YAML value |
-|---|---|
-| Round Robin | `round_robin` |
-| Random | `random` |
-| Weighted Round Robin | `weighted_round_robin` |
+| Strategy | YAML value | Behaviour |
+|---|---|---|
+| Round Robin | `round_robin` | Selects healthy backends sequentially |
+| Random | `random` | Selects a healthy backend randomly |
+| Weighted Round Robin | `weighted_round_robin` | Distributes requests according to backend weights |
+| Least Connections | `least_connections` | Selects a backend with the fewest active connections |
 
-Round Robin is the default strategy when the `load_balancing` section is omitted.
+For example, weights of 3:2:1 produce an approximate distribution of 15:10:5 over 30 requests when all backends remain healthy and eligible.
 
-The configuration loader validates required fields, port ranges, health-check thresholds, duplicate backend entries, strategy names, and backend weights.
+The configuration loader validates required settings, port ranges, backend entries, health-check thresholds, and supported strategy names.
 
-You can also supply a different configuration file:
+A custom configuration file can be supplied as a command-line argument:
 
 ```bash
 ./build/aetherproxy path/to/custom-config.yaml
 ```
 
-## Prerequisites
+## Running AetherProxy
 
-On Ubuntu / WSL2:
+Start the backend servers first.
 
-```bash
-sudo apt update
-sudo apt install build-essential cmake libboost-all-dev libyaml-cpp-dev python3
-```
+Open three terminals from the project root.
 
-## Build
+**Terminal 1 — Backend 9001**
 
 ```bash
-git clone git@github.com:Raksha-BR/aetherproxy.git
-cd aetherproxy
-
-cmake -S . -B build
-cmake --build build -j2
+python3 dev/backend/server.py --port 9001
 ```
 
-## Run AetherProxy
+**Terminal 2 — Backend 9002**
 
-From the project root:
+```bash
+python3 dev/backend/server.py --port 9002
+```
+
+**Terminal 3 — Backend 9004**
+
+```bash
+python3 dev/backend/server.py --port 9004
+```
+
+**Terminal 4 — AetherProxy**
 
 ```bash
 ./build/aetherproxy
 ```
 
-The default configuration listens on:
+The default proxy endpoint is:
 
 ```text
-127.0.0.1:8080
+http://127.0.0.1:8080
 ```
 
-## Run Test Backends
-
-Start all three test backends from one terminal:
+Send a request:
 
 ```bash
-python3 - <<'PY'
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread, Event
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/health":
-            body = b"OK"
-        else:
-            body = f"Backend {self.server.server_port} received: {self.path}\n".encode()
-
-        self.send_response(200)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, fmt, *args):
-        print(f"[Backend {self.server.server_port}] {fmt % args}")
-
-servers = []
-
-for port in (9001, 9002, 9004):
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    Thread(target=server.serve_forever, daemon=True).start()
-    servers.append(server)
-    print(f"Backend listening on {port}")
-
-Event().wait()
-PY
+curl -i http://127.0.0.1:8080/
 ```
 
-Keep this terminal running while testing the proxy.
+## Connection Pooling
+
+AetherProxy maintains backend connection pools to reduce repeated connection establishment overhead.
+
+The current server configuration initializes the pool with a maximum of 10 connections per backend.
+
+The pool:
+- Reuses eligible HTTP keep-alive connections.
+- Grants an exclusive connection lease to each request.
+- Queues acquisition requests when the pool reaches capacity.
+- Tracks active and idle connections.
+- Releases or closes connections according to their reusability.
+- Supports cancellation of queued requests.
+
+Connection-pool limits are reflected in the Prometheus metrics.
+
+## Health Monitoring and Failover
+
+The proxy combines active and passive backend health detection.
+
+**Active health checks**
+
+The health monitor periodically sends:
+
+```http
+GET /health
+```
+
+A backend must return HTTP `200 OK` to pass the check.
+
+With the default configuration:
+- Two consecutive failed checks are required to mark a healthy backend unhealthy.
+- Two consecutive successful checks are required to recover an unhealthy backend.
+
+**Passive failure detection**
+
+Backend communication failures can trigger immediate unhealthy-state handling.
+
+Unhealthy backends are excluded from normal backend selection. Once active health checks confirm recovery, they become eligible again.
+
+## Request Timeouts and Retries
+
+The upstream request timeout covers the backend connection-acquisition and forwarding lifecycle.
+
+The proxy returns appropriate gateway errors when an upstream operation fails or exceeds its timeout.
+
+Retries are deliberately restricted to eligible failures that occur before a request is forwarded. A request is not blindly replayed after it may have reached a backend, avoiding unsafe duplicate execution.
+
+## Prometheus Metrics
+
+Metrics are available at:
+
+```text
+http://127.0.0.1:8080/metrics
+```
+
+Inspect them using:
+
+```bash
+curl -s http://127.0.0.1:8080/metrics
+```
+
+### Exported metrics
+
+| Metric | Type | Description |
+|---|---|---|
+| `aetherproxy_active_connections` | Gauge | Active client connections |
+| `aetherproxy_requests_total` | Counter | Total requests received |
+| `aetherproxy_requests_successful_total` | Counter | Successful requests |
+| `aetherproxy_requests_failed_total` | Counter | Failed requests |
+| `aetherproxy_request_duration_seconds_sum` | Summary | Aggregate request duration |
+| `aetherproxy_request_duration_seconds_count` | Summary | Number of recorded request durations |
+| `aetherproxy_backend_healthy` | Gauge | Backend health state |
+| `aetherproxy_pool_connections_total` | Gauge | Open backend connections |
+| `aetherproxy_pool_connections_idle` | Gauge | Idle backend connections |
+| `aetherproxy_pool_connections_active` | Gauge | Active backend connections |
+| `aetherproxy_pool_requests_waiting` | Gauge | Requests waiting for a connection |
+| `aetherproxy_pool_connections_max` | Gauge | Maximum connections per backend |
+
+Backend-specific metrics include a `backend` label.
+
+The request-duration summary currently exposes aggregate sum and count; histogram buckets and quantiles are not provided.
 
 ## Testing
 
-Send a request through the proxy:
+Build and run the complete test suite:
 
 ```bash
-curl -i http://127.0.0.1:8080/test
+cmake --build build -j2
+
+ctest --test-dir build --output-on-failure
 ```
 
-### Test Round Robin
+The test suite includes:
+- Backend registry unit tests.
+- Load-balancing and health-state tests.
+- Prometheus metrics tests.
+- Connection-pool tests.
+- Configuration validation tests.
+- HTTP forwarding integration tests.
+- Round-robin integration tests.
+- Health failover integration tests.
 
-Set the strategy to `round_robin` in `config/aetherproxy.yaml`, restart AetherProxy, and send multiple requests:
+The currently verified test suite contains **33 tests**, all passing in the development environment.
+
+## Performance Benchmarking
+
+AetherProxy was benchmarked locally using `wrk` with three threaded Python backend servers.
+
+Example command:
 
 ```bash
-for i in {1..9}; do
-    curl -s http://127.0.0.1:8080/test
-done
+wrk -t2 -c50 -d30s --timeout 15s --latency \
+    http://127.0.0.1:8080/
 ```
 
-With all backends healthy, requests should be distributed equally.
+One recorded run produced:
 
-### Test Random
+| Metric | Result |
+|---|---:|
+| Duration | 30 seconds |
+| Client threads | 2 |
+| Concurrent connections | 50 |
+| Requests per second | 728.52 |
+| Average latency | 84.90 ms |
+| Median latency | 60.63 ms |
+| 90th percentile latency | 119.02 ms |
+| 99th percentile latency | 802.77 ms |
+| Total requests | 21,890 |
 
-Set the strategy to `random`, restart AetherProxy, and send multiple requests:
+These are local development measurements, not production capacity guarantees. Results depend on the host machine, backend implementation, workload, and system configuration.
 
-```bash
-for i in {1..30}; do
-    curl -s http://127.0.0.1:8080/test
-done
-```
+## Graceful Shutdown
 
-Requests should be distributed randomly across healthy backends.
+AetherProxy handles `SIGINT` and `SIGTERM`.
 
-### Test Weighted Round Robin
+On shutdown, it stops accepting new client connections, stops scheduled health checks, and allows active sessions to complete their shutdown lifecycle before closing their resources.
 
-Set the strategy to `weighted_round_robin`, restart AetherProxy, and send multiple requests:
+Stop the proxy with:
 
-```bash
-for i in {1..30}; do
-    curl -s http://127.0.0.1:8080/test
-done
-```
-
-With weights 3:2:1, the expected distribution over 30 requests is approximately 15, 10, and 5 requests respectively.
-
-After restarting AetherProxy, allow the active health monitor to complete its required successful checks before sending test traffic.
-
-### Check Backend Health Endpoints
-
-```bash
-curl -i http://127.0.0.1:9001/health
-curl -i http://127.0.0.1:9002/health
-curl -i http://127.0.0.1:9004/health
-```
-
-Each healthy backend should return HTTP `200 OK`.
-
-## Test Failure Detection and Recovery
-
-1. Start all configured backends and AetherProxy.
-2. Configure one backend to return HTTP `503` for `/health`.
-3. Wait for the configured consecutive failure threshold.
-4. Verify the unhealthy transition in the AetherProxy terminal.
-5. Restore the backend so `/health` returns HTTP `200`.
-6. Wait for the configured consecutive success threshold.
-7. Verify the recovery transition.
-
-## Logging
-
-Display logs and save them to a file:
-
-```bash
-mkdir -p logs
-./build/aetherproxy 2>&1 | tee -a logs/aetherproxy.log
-```
-
-Inspect saved logs:
-
-```bash
-tail -f logs/aetherproxy.log
+```text
+Ctrl+C
 ```
 
 ## Development Status
 
-Implemented:
+Implemented and verified:
+- Asynchronous HTTP reverse proxy.
+- Multiple backend support.
+- Four load-balancing strategies.
+- Active and passive backend health monitoring.
+- Backend failure exclusion and recovery.
+- Per-backend connection pooling.
+- HTTP keep-alive connection reuse.
+- Request timeouts and restricted retries.
+- Multi-threaded event-loop execution.
+- Strand-based asynchronous handler serialization.
+- Graceful shutdown.
+- Prometheus-compatible metrics.
+- YAML configuration and validation.
+- Unit and integration test suite.
 
-- HTTP request forwarding
-- Multiple backend support
-- Round Robin load balancing
-- Random load balancing
-- Smooth Weighted Round Robin load balancing
-- Configurable backend weights
-- Passive backend failure detection
-- Active asynchronous HTTP health checks
-- Configurable health-check intervals and thresholds
-- YAML-based server, backend, and load-balancing configuration
-- Configuration validation
-- Custom configuration file support
-- Automatic backend exclusion and recovery
-- Upstream and health-check timeouts
-- Runtime logging
+## Current Scope and Limitations
 
-Planned:
+- The application currently implements HTTP proxying; HTTPS termination is not provided by the proxy itself.
+- Performance figures are from a local development environment.
+- The request-duration summary does not currently expose histogram buckets.
 
-- Connection pooling
-- Metrics and observability
-- Docker support
-- Cloud deployment
-- Integration and stress testing
 
 ## License
+
+No license has been specified yet.
